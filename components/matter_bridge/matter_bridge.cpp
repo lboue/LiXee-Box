@@ -274,6 +274,43 @@ static esp_err_t set_parent_endpoint(endpoint_t *child_ep, endpoint_t *parent_ep
 // nom, et le parametre label etait recu puis ignore.
 // ============================================================================
 
+/**
+ * Version logicielle Zigbee (Basic 0x0000/0x4000, SWBuildID), telle que
+ * stockee par device_data - meme format que le "swVersion" de l'interface
+ * web (basic_text() dans web_zigbee.cpp).
+ */
+static void get_zigbee_sw_version(uint64_t ieee, char *out, size_t len)
+{
+    out[0] = '\0';
+    const devdata_attr_t *a = device_data_get_attr(ieee, 0x0000, 0x4000);
+    if (!a || !a->value[0]) return;
+    char hex[DEVDATA_VALUE_LEN];
+    strlcpy(hex, a->value, sizeof(hex));
+    device_data_format_value(0x0000, 0x4000, hex, a->type ? a->type : 0x42, NULL, 1.0f, out, len);
+}
+
+/**
+ * Encode une version textuelle ("1.0.4") en entier Matter (SoftwareVersion) :
+ * jusqu'a 3 nombres, un octet chacun (0x01 0x00 0x04 -> 0x00010004). Chaine
+ * vide ou sans chiffre -> 0 : seul SoftwareVersionString restera renseigne.
+ */
+static uint32_t pack_software_version(const char *ver)
+{
+    if (!ver) return 0;
+    uint32_t packed = 0;
+    int parts = 0;
+    const char *p = ver;
+    while (*p && parts < 3) {
+        if (*p < '0' || *p > '9') { p++; continue; }
+        char *end;
+        unsigned long n = strtoul(p, &end, 10);
+        packed = (packed << 8) | (uint32_t)(n & 0xFF);
+        p = end;
+        parts++;
+    }
+    return parts == 0 ? 0 : (packed << (8 * (3 - parts)));
+}
+
 static void set_bridged_identity(endpoint_t *ep, uint64_t ieee, const char *label, const char *product)
 {
     cluster_t *bdbi = cluster::get(ep, BridgedDeviceBasicInformation::Id);
@@ -336,18 +373,32 @@ static void set_bridged_identity(endpoint_t *ep, uint64_t ieee, const char *labe
                 bdbi, buf, (uint16_t)strlen(buf));
         }
     }
+
+    // Version logicielle Zigbee (Basic 0x0000/0x4000, SWBuildID), connue de
+    // l'interview si elle est arrivee avant la creation de cet endpoint,
+    // sinon rattrapee plus tard par matter_bridge_update_bridged_identity()
+    // comme VendorName/ProductName ci-dessus.
+    char ver[33];
+    get_zigbee_sw_version(ieee, ver, sizeof(ver));
+    if (ver[0]) {
+        cluster::bridged_device_basic_information::attribute::create_software_version_string(
+            bdbi, ver, (uint16_t)strlen(ver));
+        cluster::bridged_device_basic_information::attribute::create_software_version(
+            bdbi, pack_software_version(ver));
+    }
 }
 
 // ============================================================================
-// Helper: completer/mettre a jour VendorName et ProductName (BridgedDeviceBasic
-// Information, 0x0039) apres coup, quand le fabricant/modele Zigbee arrive
-// apres la creation de l'endpoint (set_bridged_identity() ne s'execute qu'une
-// fois). Cree l'attribut s'il n'existait pas encore, sinon met a jour sa
-// valeur. vendor/model peuvent etre NULL ou vides (aucune action pour ce
-// champ dans ce cas).
+// Helper: completer/mettre a jour VendorName, ProductName et SoftwareVersion(String)
+// (BridgedDeviceBasicInformation, 0x0039) apres coup, quand le fabricant/modele/
+// version Zigbee arrive apres la creation de l'endpoint (set_bridged_identity()
+// ne s'execute qu'une fois). Cree l'attribut s'il n'existait pas encore, sinon
+// met a jour sa valeur. vendor/model/version peuvent etre NULL ou vides
+// (aucune action pour ce champ dans ce cas).
 // ============================================================================
 
-esp_err_t matter_bridge_update_bridged_identity(int endpoint_id, const char *vendor, const char *model)
+esp_err_t matter_bridge_update_bridged_identity(int endpoint_id, const char *vendor, const char *model,
+                                                const char *version)
 {
     if (!s_matter_node || !s_matter_started) return ESP_ERR_INVALID_STATE;
     bool held;
@@ -385,6 +436,32 @@ esp_err_t matter_bridge_update_bridged_identity(int endpoint_id, const char *ven
             } else {
                 cluster::bridged_device_basic_information::attribute::create_product_name(
                     bdbi, buf, (uint16_t)strlen(buf));
+            }
+        }
+        if (version && version[0]) {
+            strlcpy(buf, version, sizeof(buf));
+            attribute_t *attr = attribute::get(bdbi, BridgedDeviceBasicInformation::Attributes::SoftwareVersionString::Id);
+            if (attr) {
+                esp_matter_attr_val_t v = esp_matter_char_str(buf, (uint16_t)strlen(buf));
+                s_zigbee_update_in_progress = true;
+                attribute::update(endpoint_id, BridgedDeviceBasicInformation::Id,
+                                  BridgedDeviceBasicInformation::Attributes::SoftwareVersionString::Id, &v);
+                s_zigbee_update_in_progress = false;
+            } else {
+                cluster::bridged_device_basic_information::attribute::create_software_version_string(
+                    bdbi, buf, (uint16_t)strlen(buf));
+            }
+
+            uint32_t packed = pack_software_version(buf);
+            attribute_t *ver_attr = attribute::get(bdbi, BridgedDeviceBasicInformation::Attributes::SoftwareVersion::Id);
+            if (ver_attr) {
+                esp_matter_attr_val_t v = esp_matter_uint32(packed);
+                s_zigbee_update_in_progress = true;
+                attribute::update(endpoint_id, BridgedDeviceBasicInformation::Id,
+                                  BridgedDeviceBasicInformation::Attributes::SoftwareVersion::Id, &v);
+                s_zigbee_update_in_progress = false;
+            } else {
+                cluster::bridged_device_basic_information::attribute::create_software_version(bdbi, packed);
             }
         }
     }

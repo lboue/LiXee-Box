@@ -714,22 +714,25 @@ static esp_err_t apply_profile(bridge_device_mapping_t *m, const zigate_attribut
 static esp_err_t apply_report(const bridge_device_mapping_t *mapping, const char *model,
                               const zigate_attribute_report_t *report)
 {
-    // Basic cluster (0x0000) : fabricant/modele Zigbee peuvent arriver apres
-    // la creation de l'endpoint Matter (set_bridged_identity() dans
+    // Basic cluster (0x0000) : fabricant/modele/version Zigbee peuvent arriver
+    // apres la creation de l'endpoint Matter (set_bridged_identity() dans
     // matter_bridge.cpp ne s'execute qu'une fois, a la creation) - completer
-    // ou mettre a jour VendorName/ProductName (BridgedDeviceBasicInformation,
-    // 0x0039) des qu'ils sont connus. Avant le profil du template : s'applique
-    // a tous les devices, pas seulement ceux avec un profil.
+    // ou mettre a jour VendorName/ProductName/SoftwareVersion(String)
+    // (BridgedDeviceBasicInformation, 0x0039) des qu'ils sont connus. Avant le
+    // profil du template : s'applique a tous les devices, pas seulement ceux
+    // avec un profil.
     if (report->cluster_id == 0x0000 && report->data_len > 0 &&
-        (report->attr_id == 0x0004 || report->attr_id == 0x0005)) {
+        (report->attr_id == 0x0004 || report->attr_id == 0x0005 || report->attr_id == 0x4000)) {
         char str[33];
         size_t n = report->data_len > 32 ? 32 : report->data_len;
         memcpy(str, report->data, n);
         str[n] = '\0';
         if (report->attr_id == 0x0004) {  // Manufacturer Name
-            matter_bridge_update_bridged_identity(mapping->matter_endpoint, str, NULL);
-        } else {  // Model Identifier
-            matter_bridge_update_bridged_identity(mapping->matter_endpoint, NULL, str);
+            matter_bridge_update_bridged_identity(mapping->matter_endpoint, str, NULL, NULL);
+        } else if (report->attr_id == 0x0005) {  // Model Identifier
+            matter_bridge_update_bridged_identity(mapping->matter_endpoint, NULL, str, NULL);
+        } else {  // SW Build ID (version logicielle)
+            matter_bridge_update_bridged_identity(mapping->matter_endpoint, NULL, NULL, str);
         }
     }
 
